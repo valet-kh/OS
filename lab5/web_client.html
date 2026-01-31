@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoT Sensor Tables</title>
+    <style>
+        body {
+            font-family: monospace;
+            background-color: #121212;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        h1, h2 { text-align: center; color: #4caf50; }
+        
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        .panel {
+            border: 1px solid #333;
+            padding: 10px;
+            width: 300px;
+            background: #1e1e1e;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th, td {
+            border-bottom: 1px solid #333;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th { color: #80cbc4; }
+        tr:hover { background-color: #2c2c2c; }
+    </style>
+</head>
+<body>
+
+    <h1>📊 Данные сенсорa</h1>
+
+    <div class="container">
+        <!-- Блок 1: Сырые данные -->
+        <div class="panel">
+            <h2>Текущие (Live)</h2>
+            <table id="tabRaw">
+                <thead><tr><th>Время</th><th>Значение (°C)</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- Блок 2: Часовая статистика -->
+        <div class="panel">
+            <h2>Часовые средние</h2>
+            <table id="tabHourly">
+                <thead><tr><th>Время</th><th>Среднее (°C)</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- Блок 3: Дневная статистика -->
+        <div class="panel">
+            <h2>Дневные средние</h2>
+            <table id="tabDaily">
+                <thead><tr><th>Время</th><th>Среднее (°C)</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Функция обновления конкретной таблицы
+        async function updateTable(url, tableId) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) return;
+
+                const data = await response.json();
+                const tbody = document.querySelector(`#${tableId} tbody`);
+                tbody.innerHTML = ''; // Очищаем старые строки
+
+                // Данные приходят отсортированные "новые сверху" (DESC), это удобно для таблиц
+                data.forEach(row => {
+                    const tr = document.createElement('tr');
+                    
+                    // Форматируем время
+                    const date = new Date(row.t * 1000);
+                    const timeStr = date.toLocaleTimeString(); // чч:мм:сс
+
+                    tr.innerHTML = `
+                        <td>${timeStr}</td>
+                        <td>${row.y.toFixed(2)}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (err) {
+                console.error("Ошибка загрузки:", url, err);
+            }
+        }
+
+        // Обновляем таблицы
+        function refreshAll() {
+            updateTable('/api/current', 'tabRaw');
+            updateTable('/api/hourly', 'tabHourly');
+            updateTable('/api/daily', 'tabDaily');
+        }
+
+        // Запуск
+        refreshAll();
+        
+        // Автообновление раз в секунду
+        setInterval(refreshAll, 1000);
+    </script>
+
+</body>
+</html>

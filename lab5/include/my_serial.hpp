@@ -17,6 +17,7 @@
 #include <string>    // std::string
 #include <cstring>   // strcmp()
 #include <vector>    // vector
+#include <cstdint>
 
 #define MY_PORT_READ_BUF	1500
 #define MY_PORT_WRITE_BUF   1500

@@ -1,201 +1,170 @@
 #include <iostream>
-#include <fstream>
 #include <vector>
-#include <string>
-#include <cstdio>  
-#include <ctime>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <mutex>
 #include <iomanip>
-#include <chrono>  
 
+#include "http_server.hpp"
 #include "my_serial.hpp"
+#include "database.hpp"
 
-// Кроссплатформенный сон
-#ifdef _WIN32
-    #include <windows.h>
-    #define SLEEP_MS(x) Sleep(x)
-#else
-    #include <unistd.h>
-    #define SLEEP_MS(x) usleep((x)*1000)
-#endif
+using std::cout;
+using std::cerr;
+using std::endl;
+using std::string;
+using std::vector;
+
+using std::chrono::duration_cast;
+using std::chrono::seconds;
+
+
+const int SIM_HOUR  = 5;   // 1 "час" = 5 секунд
+const int SIM_DAY   = 10;  // 1 "сутки" = 10 секунд
+const int SIM_MONTH = 20;  // 1 "месяц" = 20 секунд  
+const int SIM_YEAR  = 40;  // 1 "год" = 40 секунд
+
+const int RETENTION_RAW = SIM_DAY;      // 10 секунд (последние 24 часа) ~ 10 RAW записей в лог 
+const int RETENTION_HOUR = SIM_MONTH;   // 20 секунд (последний месяц)  ~ 4 HOUR записи в лог 
+const int RETENTION_DAY = SIM_YEAR;     // 40 секунд (весь год)         ~ 4 DAY записи в лог 
+
 
 using sys_clock = std::chrono::system_clock;
 
-// --- Настройки симуляции ---
-const int SIM_HOUR  = 5;   // 1 "час" = 5 секунд
-const int SIM_DAY   = 10;  // 1 "сутки" = 10 секунд
-const int SIM_MONTH = 20;  
-const int SIM_YEAR  = 40; 
+DBManager db;
+std::mutex db_mutex; 
 
-// Время хранения
-const int RETENTION_RAW = SIM_DAY; 
-const int RETENTION_HOUR = SIM_MONTH;
-const int RETENTION_DAY = SIM_YEAR;
-
-struct measure_t {
-    sys_clock::time_point stamp;
-    double val;
-};
-
-// Запись в файл
-void save_data(const std::string& path, double val, sys_clock::time_point t, const std::string& tag) {
-    std::time_t tt = sys_clock::to_time_t(t);
-    std::tm tm = *std::localtime(&tt);
-    
-    std::ofstream file(path, std::ios::app);
-    if (file.is_open()) {
-        file << "TS: " << std::put_time(&tm, "%H:%M:%S") 
-             << " | ID: " << std::left << std::setw(6) << tag 
-             << " | VAL: " << std::fixed << std::setprecision(2) << val << "\n";
+string records_to_json(const vector<DBRecord>& records) {
+    string json = "[";
+    for (size_t i = 0; i < records.size(); ++i) {
+        json += "{\"t\":" + std::to_string(records[i].timestamp) + ", \"y\":" + std::to_string(records[i].value) + "}";
+        if (i < records.size() - 1) json += ",";
     }
+    json += "]";
+    return json;
 }
 
-// Ротация логов
-void rotate_logs(const std::string& path, int max_age_seconds) {
-    std::ifstream in(path);
-    std::vector<std::string> keep_lines;
-    std::string line;
-    
-    if (in.is_open()) {
-        while (std::getline(in, line)) {
-            if (!line.empty()) keep_lines.push_back(line);
-        }
-        in.close();
-    }
 
-    size_t limit = (max_age_seconds > 15) ? 50 : 20; 
-    
-    if (keep_lines.size() > limit) {
-        std::ofstream out(path, std::ios::trunc);
-        for (size_t i = keep_lines.size() - limit; i < keep_lines.size(); ++i) {
-            out << keep_lines[i] << "\n";
-        }
-    }
-}
-
-// Чтение данных
-std::vector<measure_t> read_recent_data(const std::string& path) {
-    std::vector<measure_t> res;
-    std::ifstream in(path);
-    std::string line;
-    
-    if (in.is_open()) {
-        while (std::getline(in, line)) {
-            try {
-                size_t p = line.find("VAL: ");
-                if (p != std::string::npos) {
-                    double v = std::stod(line.substr(p + 5));
-                    res.push_back({sys_clock::now(), v});
-                }
-            } catch (...) {}
-        }
-    }
-    return res;
-}
-
-void process_loop(cplib::SerialPort& port) {
-    std::string buffer;
-    auto t_hour = sys_clock::now();
-    auto t_day = sys_clock::now();
-
-    // Очистка старых логов при запуске
-    std::remove("data_stream.log");
-    std::remove("stat_hour.log");
-    std::remove("stat_day.log");
-
-    std::cout << "Waiting for data from device..." << std::endl;
+void data_collection_loop(cplib::SerialPort& port) {
+    string line_buffer;  // ИЗМЕНЕНО: buffer -> line_buffer для ясности
+    auto last_hour_calc = sys_clock::now();
+    auto last_day_calc = sys_clock::now();
 
     while (true) {
-        std::string chunk;
+        char read_buf[256];                          
+        size_t bytes_read = 0;                        
         
-        // Читаем кусочек данных
-        int res = port.Read(chunk);
+        int res = port.Read(read_buf, sizeof(read_buf) - 1, &bytes_read);
         
-        // Если что-то пришло
-        if (res == cplib::SerialPort::RE_OK && !chunk.empty()) {
-            buffer += chunk;
+        if (res == cplib::SerialPort::RE_OK && bytes_read > 0) { 
+            read_buf[bytes_read] = '\0';               
+            line_buffer += read_buf;                   
             
-            // Если буфер слишком разросся без \n - чистим, чтобы не лопнула память
-            if (buffer.size() > 1024) buffer.clear();
-
             size_t p;
-            while ((p = buffer.find('\n')) != std::string::npos) {
-                std::string raw = buffer.substr(0, p);
-                buffer.erase(0, p + 1);
+            while ((p = line_buffer.find('\n')) != string::npos) {
+                string raw = line_buffer.substr(0, p);
+                line_buffer.erase(0, p + 1);
                 
-                // Удаляем возможные символы возврата каретки \r (Windows)
                 if (!raw.empty() && raw.back() == '\r') raw.pop_back();
-                
-                if (raw.empty()) continue;
+
+                if (raw.empty()) continue;  
 
                 try {
                     double val = std::stod(raw);
                     auto now = sys_clock::now();
-                    std::cout << "RX: " << val << " C" << std::endl;
+                    long long ts = duration_cast<seconds>(now.time_since_epoch()).count();
 
-                    save_data("data_stream.log", val, now, "RAW");
-                    rotate_logs("data_stream.log", RETENTION_RAW);
+                    // сохранение raw_data
+                    cout << "[SENSOR] Value: " << std::fixed << std::setprecision(2) << val << endl;
+                    {
+                        std::lock_guard<std::mutex> lock(db_mutex);
+                        db.Insert("raw_data", ts, val);
+                        db.CleanupOldData("raw_data", ts - RETENTION_RAW);
+                    }
 
-                    // --- Логика "Часа" ---
-                    auto diff_h = std::chrono::duration_cast<std::chrono::seconds>(now - t_hour).count();
+                    // проверка на часовой интервал и сохранение hourly_stats
+                    auto diff_h = duration_cast<seconds>(now - last_hour_calc).count();
                     if (diff_h >= SIM_HOUR) {
-                        auto data = read_recent_data("data_stream.log");
-                        if (!data.empty()) {
-                            double sum = 0;
-                            for(auto& m : data) sum += m.val;
-                            double avg = sum / data.size();
-                            std::cout << "[HOURLY] Avg: " << avg << std::endl;
-                            save_data("stat_hour.log", avg, now, "HOUR");
+                        std::lock_guard<std::mutex> lock(db_mutex);
+                        double avg = db.GetAverage("raw_data", ts - SIM_HOUR);
+                        if (avg > 0.001) { 
+                            cout << "[HOURLY] Avg: " << std::fixed << std::setprecision(2) << avg << endl; 
+                            db.Insert("hourly_stats", ts, avg);
+                            db.CleanupOldData("hourly_stats", ts - RETENTION_HOUR);
                         }
-                        rotate_logs("stat_hour.log", RETENTION_HOUR);
-                        t_hour = now;
+                        last_hour_calc = now;
                     }
 
-                    // --- Логика "Дня" ---
-                    auto diff_d = std::chrono::duration_cast<std::chrono::seconds>(now - t_day).count();
+                    // проверка на дневной интервал и сохранение daily_stats
+                    auto diff_d = duration_cast<seconds>(now - last_day_calc).count();
                     if (diff_d >= SIM_DAY) {
-                        auto data = read_recent_data("stat_hour.log");
-                        if (!data.empty()) {
-                            double sum = 0;
-                            for(auto& m : data) sum += m.val;
-                            double avg = sum / data.size();
-                            std::cout << "[DAILY] Avg: " << avg << std::endl;
-                            save_data("stat_day.log", avg, now, "DAY");
+                        std::lock_guard<std::mutex> lock(db_mutex);
+                        double avg = db.GetAverage("hourly_stats", ts - SIM_DAY);
+                        if (avg > 0.001) {
+                            cout << "[DAILY] Avg: " << std::fixed << std::setprecision(2) << avg << endl;
+                            db.Insert("daily_stats", ts, avg);
+                            db.CleanupOldData("daily_stats", ts - RETENTION_DAY);
                         }
-                        rotate_logs("stat_day.log", RETENTION_DAY);
-                        t_day = now;
+                        last_day_calc = now;
                     }
 
+                } catch (const std::exception& e) { 
+                    cerr << "Parse error: " << e.what() << " on raw: " << raw << endl;
                 } catch (...) {
-                    // Игнорируем битые строки
+                    cerr << "Unknown error parsing: " << raw << endl;
                 }
             }
         } else {
-            // Данных нет - спим немного, чтобы не грузить ЦП
-            SLEEP_MS(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cout << "Usage: LogTool <PORT>" << std::endl;
+        cout << "Usage: LogTool <PORT>" << endl;
+        cout << "Example: LogTool COM (Windows) or LogTool /dev/ttyUSB0 (Linux)" << endl;
         return 1;
     }
-    
+
+    if (!db.Open("sensor_log.db")) {
+        cerr << "Error opening db" << endl;
+        return 1;
+    }
+    cout << "DB opened" << endl;
+
     cplib::SerialPort port;
-    std::cout << "Connecting to " << argv[1] << "..." << std::endl;
-    
     if (port.Open(argv[1], cplib::SerialPort::BAUDRATE_9600) != cplib::SerialPort::RE_OK) {
-        std::cerr << "Port error: " << argv[1] << " (Check if port exists or is used)" << std::endl;
+        cerr << "Port error: " << argv[1] << endl;
         return 1;
     }
-    
-    port.Flush(); 
+    port.Flush();
     port.SetTimeout(0.1);
+    cout << "Listening on port " << argv[1] << endl;
+
+    HttpServer server(8080);
+
+    server.SetHandlers(
+        []() { // /api/current
+            std::lock_guard<std::mutex> lock(db_mutex);
+            return records_to_json(db.GetAll("raw_data", 50));
+        },
+        []() { // /api/hourly
+            std::lock_guard<std::mutex> lock(db_mutex);
+            return records_to_json(db.GetAll("hourly_stats", 24));
+        },
+        []() { // /api/daily
+            std::lock_guard<std::mutex> lock(db_mutex);
+            return records_to_json(db.GetAll("daily_stats", 30));
+        }
+    );
+
+    std::thread collector(data_collection_loop, std::ref(port));
     
-    std::cout << "Logger started successfully." << std::endl;
-    
-    process_loop(port);
+    server.Start();
+
+    if (collector.joinable()) collector.join();
     
     return 0;
 }

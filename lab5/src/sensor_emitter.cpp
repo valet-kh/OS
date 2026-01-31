@@ -3,8 +3,18 @@
 #include <cstdio>
 #include <cstdlib> 
 #include <ctime>   
+#include <cstdint>
 
 #include "my_serial.hpp"
+
+using std::cout;
+using std::cerr;
+using std::endl;
+using std::string;
+using std::snprintf;
+using std::rand;
+using std::srand;
+using std::time;
 
 #ifdef _WIN32
     #include <windows.h>
@@ -17,24 +27,23 @@
 void run_simulation(const char* port_name) {
     cplib::SerialPort serial;
     if (serial.Open(port_name, cplib::SerialPort::BAUDRATE_9600) != cplib::SerialPort::RE_OK) {
-        std::cerr << "Cannot open port: " << port_name << std::endl;
+        cerr << "Cannot open port: " << port_name << endl;
         return;
     }
 
-    // Инициализируем генератор случайных чисел от текущего времени
-    std::srand(std::time(nullptr));
+    srand(time(nullptr));
+    
 
     while (true) {
-
-        double t = 20.0 + (std::rand() % 51) / 10.0;
+        double t = 10.0 + (rand() % 101) / 10.0;
         
         char buffer[32];
-        std::snprintf(buffer, sizeof(buffer), "%.2f\n", t);
+        snprintf(buffer, sizeof(buffer), "%.2f\n", t);
         
-        std::string payload = buffer;
+        string payload = buffer;
         
         if (serial.Write(payload) == cplib::SerialPort::RE_OK) {
-            std::cout << "Sent: " << payload;
+            cout << "Sent: " << payload;
         }
 
         SLEEP_MS(1000);
@@ -42,7 +51,11 @@ void run_simulation(const char* port_name) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) return 1;
+    if (argc < 2) {
+        cout << "Usage: sensor_emulator <PORT>" << endl;
+        cout << "Example: sensor_emulator COM№ (Windows) or /dev/ttyUSB0 (Linux)" << endl;
+        return 1;
+    }
     run_simulation(argv[1]);
     return 0;
 }

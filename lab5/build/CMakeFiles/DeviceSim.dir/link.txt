@@ -1,3 +1,0 @@
-"C:\Program Files\CMake\bin\cmake.exe" -E rm -f CMakeFiles\DeviceSim.dir/objects.a
-C:\MinGW\bin\ar.exe qc CMakeFiles\DeviceSim.dir/objects.a @CMakeFiles\DeviceSim.dir\objects1.rsp
-C:\MinGW\bin\c++.exe -Wl,--whole-archive CMakeFiles\DeviceSim.dir/objects.a -Wl,--no-whole-archive -o DeviceSim.exe -Wl,--out-implib,libDeviceSim.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\DeviceSim.dir\linkLibs.rsp
